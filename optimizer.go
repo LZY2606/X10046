@@ -159,6 +159,17 @@ func getCommonLabelFilters(e Expr) []LabelFilter {
 			// {fCommon, f1} or on(f3) {fCommon, f2} -> {}
 			lfs = intersectLabelFilters(lfsLeft, lfsRight)
 			return TrimFiltersByGroupModifier(lfs, t)
+		case "default":
+			// `default` is a series-level coalesce (union of both sides like `or`),
+			// not a value-level arithmetic op: its result contains every series from
+			// the left side and falls back to the right side only when no left series
+			// matches. Only filters present on both sides are therefore safe to push
+			// down; a side-specific filter must not be injected into the other side,
+			// since that could drop series the fallback is supposed to surface.
+			// {fCommon, f1} default {fCommon, f2} -> {fCommon}
+			// {f1} default {f2} -> {}
+			lfs = intersectLabelFilters(lfsLeft, lfsRight)
+			return TrimFiltersByGroupModifier(lfs, t)
 		case "unless":
 			// {f1} unless {f2} -> {f1}
 			// {f1} unless on() {f2} -> {}
@@ -715,6 +726,12 @@ func getTransformArgIdxForOptimization(funcName string, args []Expr) int {
 	case "drop_common_labels":
 		return -1
 	case "absent", "scalar":
+		return -1
+	case "prometheus_buckets":
+		// prometheus_buckets() converts the input `vmrange` label into `le`
+		// bucket labels. Filters inferred from the other binary-op side refer to
+		// the output label set (usually `le`), where they do not exist on the
+		// input series; pushing them down filters out all input series.
 		return -1
 	case "end", "now", "pi", "ru", "start", "step", "time":
 		return -1

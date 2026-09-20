@@ -59,6 +59,16 @@ func TestPushdownBinaryOpFilters(t *testing.T) {
 	f(`foo{a="b" or c="d" or x="y",q="w"}`, `{x="y"}`, `foo{a="b",x="y" or c="d",x="y" or q="w",x="y"}`)
 	f(`{a="b" or x="y",q="w"} + bar`, `{x="y"}`, `{a="b",x="y" or q="w",x="y"} + bar{x="y"}`)
 
+	// prometheus_buckets rewrites the vmrange label to le, so no binary-op
+	// filter may be pushed into its argument.
+	f(`prometheus_buckets(foo_bucket)`, `{le="0.5"}`, `prometheus_buckets(foo_bucket)`)
+	f(`prometheus_buckets(foo_bucket)`, `{x="y"}`, `prometheus_buckets(foo_bucket)`)
+
+	// default keeps every series from both sides (series-level union), so only
+	// filters already present on the pushed side are sound there.
+	f(`foo{x="1"} default bar`, `{x="1"}`, `foo{x="1"} default bar{x="1"}`)
+	f(`foo default bar`, `{x="1"}`, `foo{x="1"} default bar{x="1"}`)
+
 	// pushdown for label_set
 	f(`label_set(foo, "a", "b") + bar{baz="a"}`, `{x="y"}`, `label_set(foo{x="y"}, "a", "b") + bar{baz="a",x="y"}`)
 	f(`label_set(foo, "a", "b", "x", "aa") + bar{baz="a"}`, `{x="y"}`, `label_set(foo, "a", "b", "x", "aa") + bar{baz="a",x="y"}`)
@@ -206,6 +216,13 @@ func TestOptimize(t *testing.T) {
 
 	// specially handled binary expressions
 	f(`foo{a="b"} or bar{x="y"}`, `foo{a="b"} or bar{x="y"}`)
+	// default is a series-level union like or: side-specific filters must not cross sides
+	f(`foo{x="1"} default bar{x="2"}`, `foo{x="1"} default bar{x="2"}`)
+	f(`foo{x="1"} default bar{x="1"}`, `foo{x="1"} default bar{x="1"}`)
+	f(`foo{x="1",z="w"} default bar{x="2",z="w"}`, `foo{x="1",z="w"} default bar{x="2",z="w"}`)
+	f(`foo{x="1"} default on(x) bar{x="2"}`, `foo{x="1"} default on(x) bar{x="2"}`)
+	f(`(foo{x="1"} + bar{x="2"}) default baz{x="3"}`, `(foo{x="1",x="2"} + bar{x="1",x="2"}) default baz{x="3"}`)
+	f(`foo{a="b"} default (bar{c="d"} or baz)`, `foo{a="b"} default (bar{c="d"} or baz)`)
 	f(`(foo{a="b"} + bar{c="d"}) or (baz{x="y"} <= x{a="b"})`, `(foo{a="b",c="d"} + bar{a="b",c="d"}) or (baz{a="b",x="y"} <= x{a="b",x="y"})`)
 	f(`(foo{a="b"} + bar{c="d"}) or on(x) (baz{x="y"} <= x{a="b"})`, `(foo{a="b",c="d"} + bar{a="b",c="d"}) or on(x) (baz{a="b",x="y"} <= x{a="b",x="y"})`)
 	f(`foo + (bar or baz{a="b"})`, `foo + (bar or baz{a="b"})`)
@@ -276,6 +293,13 @@ func TestOptimize(t *testing.T) {
 	f(`histogram_quantiles("q", 0.1, 0.9, sum(rate({x="y"}[5m])) by (le)) - {a="b"}`, `histogram_quantiles("q", 0.1, 0.9, sum(rate({x="y"}[5m])) by(le)) - {a="b"}`)
 	f(`histogram_quantiles("q", 0.1, 0.9, sum(rate({x="y"}[5m])) by (le,x)) - {a="b"}`, `histogram_quantiles("q", 0.1, 0.9, sum(rate({x="y"}[5m])) by(le,x)) - {a="b",x="y"}`)
 	f(`histogram_quantiles("q", 0.1, 0.9, sum(rate({x="y"}[5m])) by (le,x,a)) - {a="b"}`, `histogram_quantiles("q", 0.1, 0.9, sum(rate({a="b",x="y"}[5m])) by(le,x,a)) - {a="b",x="y"}`)
+
+	// prometheus_buckets rewrites vmrange to le labels, so filters from the
+	// other binary-op side (typically le=...) must never reach its argument.
+	f(`prometheus_buckets(foo_bucket) / bar_bucket{le="0.5"}`, `prometheus_buckets(foo_bucket) / bar_bucket{le="0.5"}`)
+	f(`prometheus_buckets(foo_bucket{x="y"}) + bar{le="0.5",x="y"}`, `prometheus_buckets(foo_bucket{x="y"}) + bar{le="0.5",x="y"}`)
+	f(`prometheus_buckets(foo_bucket) + bar{x="y"}`, `prometheus_buckets(foo_bucket) + bar{x="y"}`)
+	f(`sum(prometheus_buckets(foo_bucket)) by (le) / bar_bucket{le="0.5"}`, `sum(prometheus_buckets(foo_bucket)) by(le) / bar_bucket{le="0.5"}`)
 
 	// vector
 	f(`vector(foo) + bar{a="b"}`, `vector(foo{a="b"}) + bar{a="b"}`)
